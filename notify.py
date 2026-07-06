@@ -1,7 +1,7 @@
 """
 advisory-watcher 메일 알림 — Gmail SMTP (STARTTLS 587), plain+HTML 듀얼.
 
-설정은 프로젝트 루트 .env 파일 (없으면 발송 생략하고 False 반환):
+설정은 프로젝트 루트 .env 파일:
     GMAIL_USER=you@gmail.com
     GMAIL_APP_PASSWORD=xxxxxxxxxxxxxxxx   # Google 계정 > 앱 비밀번호
     MAIL_TO=you@gmail.com                 # 콤마 구분 다중 수신 가능
@@ -9,6 +9,7 @@ advisory-watcher 메일 알림 — Gmail SMTP (STARTTLS 587), plain+HTML 듀얼.
 from __future__ import annotations
 
 import html
+import re
 import smtplib
 import ssl
 from email.message import EmailMessage
@@ -24,7 +25,9 @@ def _load_env() -> dict:
             line = line.strip()
             if line and not line.startswith("#") and "=" in line:
                 k, v = line.split("=", 1)
-                env[k.strip()] = v.split("#")[0].strip()
+                # 값 내부의 '#'은 보존(암호에 포함 가능) — ' #'(공백+해시)만 줄 끝 주석으로 절단
+                v = re.split(r"\s+#", v, maxsplit=1)[0].strip()
+                env[k.strip()] = v
     return env
 
 
@@ -63,14 +66,21 @@ def _build(rows, user: str, to: str) -> EmailMessage:
     return msg
 
 
-def send_new_advisories(rows) -> bool:
-    """신규 권고문 알림 발송. 설정이 없거나 실패하면 False (발송 안 됨)."""
+def send_new_advisories(rows):
+    """신규 권고문 알림 발송.
+
+    반환값 3-state (호출부가 exit code를 정하도록 미설정과 실패를 구분):
+      None  = 미설정(.env 없음) — 콘솔 대체가 정상, 오류 아님
+      True  = 발송 성공
+      False = 설정됐으나 발송 실패 — 모니터링이 잡아야 할 오류
+    """
     env = _load_env()
     user = env.get("GMAIL_USER")
-    password = env.get("GMAIL_APP_PASSWORD")
+    # Gmail 앱 비밀번호는 표시 형식 'xxxx xxxx xxxx xxxx'로 붙여넣어도 동작하도록 공백 제거
+    password = (env.get("GMAIL_APP_PASSWORD") or "").replace(" ", "")
     to = env.get("MAIL_TO") or user
     if not user or not password:
-        return False
+        return None
     try:
         msg = _build(rows, user, to)
         ctx = ssl.create_default_context()

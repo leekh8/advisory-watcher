@@ -24,6 +24,16 @@ python watcher.py --list 10  # 최근 수집분 조회
 
 메일 알림(선택): `.env.example`을 `.env`로 복사해 Gmail 앱 비밀번호 설정.
 
+### 종료 코드 (모니터링용)
+
+스케줄러/헬스체크가 `$?`로 이상을 감지할 수 있도록 구분된 종료 코드를 반환한다:
+
+| 코드 | 의미 |
+|---|---|
+| 0 | 정상 (신규 없음 또는 정상 처리·발송) |
+| 3 | 소스 오류 — fetch/파싱 실패, 또는 **entry_id 추출 전건 실패**(링크 포맷 변경 등 무증상 실명 방지). 일부 소스는 성공했을 수 있음 |
+| 4 | 신규 권고문은 있으나 메일 발송 실패(설정됐는데 안 감). `.env` 미설정(콘솔 대체)은 오류 아님(0) |
+
 ## 정기 실행
 
 ```bash
@@ -49,7 +59,7 @@ data/           # advisories.db (자동 생성, 커밋 제외)
 | 테이블 | 역할 |
 |---|---|
 | `advisories` | 권고문 (source, entry_id UNIQUE, title, url, published, cves, notified) |
-| `scan_log` | 실행 이력 (소스별 fetched/new/error) |
+| `scan_log` | 실행 이력 (소스별 fetched/new/**skipped**/error) — skipped>0이면 고유 ID를 못 뽑은 항목 수(추출 로직 점검 신호) |
 
 ## 소스 추가
 

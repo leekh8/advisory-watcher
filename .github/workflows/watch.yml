@@ -17,16 +17,16 @@ jobs:
   watch:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.12'   # 의존성 0(stdlib) — pip install 없음
 
       # advisories.db를 실행 간 유지 — 없으면 매번 seed 모드라 "신규만 알림"이 성립 안 함.
       # 캐시는 불변이라 run_id로 매번 새로 저장하고 restore-keys 접두사로 최신본을 복원.
       - name: Restore advisories DB
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: data
           key: advisory-db-${{ github.run_id }}
@@ -60,7 +60,7 @@ jobs:
       # 종료코드와 무관하게 DB 상태를 저장(신규 적재분 유실 방지)
       - name: Save advisories DB
         if: always()
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: data
           key: advisory-db-${{ github.run_id }}

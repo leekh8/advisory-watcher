@@ -8,6 +8,8 @@ SQLite에 적재하고 알림(메일 또는 콘솔)을 보낸다.
     python watcher.py            # 스캔 + 신규 알림 (첫 실행은 seed 모드 — 알림 없음)
     python watcher.py --no-mail  # 스캔만 (알림 생략)
     python watcher.py --list 10  # 최근 수집분 조회
+    python watcher.py --pending  # 아직 못 보낸 권고문 조회
+    python watcher.py --require-mail  # 무인 실행. 메일 미설정을 오류 취급
 """
 from __future__ import annotations
 
@@ -138,10 +140,10 @@ def extract_cves(entry: dict) -> str:
 
 # ---------------------------------------------------------------- DB
 
-def get_conn() -> sqlite3.Connection:
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+def get_conn(db_path: Path = DB_PATH) -> sqlite3.Connection:
+    db_path.parent.mkdir(parents=True, exist_ok=True)
     # timeout=30: cron 중복 기동 시 'database is locked' 크래시 대신 대기.
-    conn = sqlite3.connect(DB_PATH, timeout=30)
+    conn = sqlite3.connect(db_path, timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")  # 동시 read/write 내성
     conn.executescript("""
@@ -234,6 +236,31 @@ def mark_notified(conn: sqlite3.Connection, rows: list[sqlite3.Row]) -> None:
     conn.commit()
 
 
+# 한 번에 알릴 최대 건수. 오래 끊겼다 복구될 때 수백 건짜리 메일 한 통이 되는 것을 막는다.
+# 초과분은 notified=0으로 남아 다음 회차에 이어서 나간다.
+MAX_PENDING = 200
+
+
+def pending(conn: sqlite3.Connection, limit: int = MAX_PENDING) -> list[sqlite3.Row]:
+    """아직 알리지 못한 권고문. 이번 회차 신규 + 지난 회차에 못 보낸 것.
+
+    이번 실행에서 INSERT된 행만 보내면, 발송이 실패한 회차의 권고문이 영구히 사라진다.
+    다음 회차에는 UNIQUE 충돌로 더 이상 '신규'가 아니라서 조회 대상에서 빠지기 때문이다.
+    실측(2026-09-17): 메일 Secrets 미설정 상태로 10일 돌면서 18건이 이 경로로 유실됐다.
+    DB에 notified=0으로 남아 있었지만 그 값을 읽는 코드가 없었다.
+
+    발송 성공으로 mark_notified 하기 전까지 notified=0으로 남는 것, 그 자체가 큐다.
+    별도 큐 테이블을 두지 않는 이유는 두 곳이 어긋날 여지를 만들지 않기 위해서다.
+    """
+    return conn.execute(
+        "SELECT * FROM advisories WHERE notified=0 ORDER BY source, id LIMIT ?",
+        (limit,)).fetchall()
+
+
+def pending_count(conn: sqlite3.Connection) -> int:
+    return conn.execute("SELECT COUNT(*) FROM advisories WHERE notified=0").fetchone()[0]
+
+
 # ---------------------------------------------------------------- CLI
 
 def print_rows(rows) -> None:
@@ -246,13 +273,17 @@ def print_rows(rows) -> None:
 # 종료 코드 (모니터링/스케줄러가 $? 로 이상 감지)
 EXIT_OK = 0
 EXIT_SOURCE_ERROR = 3   # 소스 fetch/파싱/추출 오류 (일부 성공했을 수 있음)
-EXIT_MAIL_FAILED = 4    # 신규 있으나 메일 발송 실패(설정됐는데 안 감)
+EXIT_MAIL_FAILED = 4    # 보낼 것이 있으나 메일 발송 실패(설정됐는데 안 감)
+EXIT_MAIL_UNCONFIGURED = 5  # 보낼 것이 있는데 메일 설정 자체가 없음 (--require-mail 일 때만)
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="KISA + Fortinet PSIRT 보안 권고문 수집기")
     ap.add_argument("--no-mail", action="store_true", help="알림 생략 (수집만)")
+    ap.add_argument("--require-mail", action="store_true",
+                    help="메일 미설정을 오류로 취급. 무인 실행(CI, cron)에서 켠다")
     ap.add_argument("--list", type=int, metavar="N", help="최근 N건 조회 후 종료")
+    ap.add_argument("--pending", action="store_true", help="미발송 권고문 조회 후 종료")
     args = ap.parse_args()
 
     conn = get_conn()
@@ -264,15 +295,18 @@ def main() -> int:
             print_rows(rows)
             return EXIT_OK
 
+        if args.pending:
+            rows = pending(conn)
+            total = pending_count(conn)
+            print(f"=== 미발송 {total}건 (표시 {len(rows)}건) ===")
+            print_rows(rows)
+            return EXIT_OK
+
         first_run = conn.execute("SELECT COUNT(*) FROM advisories").fetchone()[0] == 0
         new_rows, errors = scan(conn)
         exit_code = EXIT_SOURCE_ERROR if errors else EXIT_OK
         if errors:
             print(f"[warn] 소스 오류 {len(errors)}건: " + " / ".join(errors))
-
-        if not new_rows:
-            print("[done] 신규 권고문 없음")
-            return exit_code
 
         if first_run:
             # 첫 실행: 기존 공지 전체가 "신규"로 잡히므로 알림 없이 seed만
@@ -280,22 +314,42 @@ def main() -> int:
             print(f"[done] 첫 실행 seed 완료 — {len(new_rows)}건 적재 (알림 생략)")
             return exit_code
 
-        print(f"[done] 신규 권고문 {len(new_rows)}건:")
-        print_rows(new_rows)
+        rows = pending(conn)
+        total_pending = pending_count(conn)
+        if not rows:
+            print("[done] 신규 권고문 없음")
+            return exit_code
+
+        backlog = total_pending - len(new_rows)
+        head = f"[done] 발송 대상 {len(rows)}건 (이번 신규 {len(new_rows)}, 이월 {backlog})"
+        if total_pending > len(rows):
+            head += f", {total_pending - len(rows)}건은 다음 회차로"
+        print(head + ":")
+        print_rows(rows)
 
         if args.no_mail:
             return exit_code
 
-        from notify import send_new_advisories  # 지연 import — --list 등에선 불필요
-        sent = send_new_advisories(new_rows)
+        from notify import mail_status, send_new_advisories  # 지연 import
+        sent = send_new_advisories(rows)
         if sent is True:
-            mark_notified(conn, new_rows)
+            mark_notified(conn, rows)
             print("[mail] 발송 완료")
         elif sent is None:
-            print("[mail] 미설정(.env 없음) — 콘솔 출력으로 대체 (위 목록)")
+            # 콘솔 대체는 사람이 보고 있는 터미널에서만 대체다. 무인 실행에서 콘솔은
+            # 버리는 곳이라, 여기를 성공으로 처리하면 매일 초록불을 켜면서 권고문을 흘린다.
+            print(f"[mail] 미설정: {mail_status()}")
+            if args.require_mail:
+                print(f"[mail] --require-mail: 보낼 것이 {len(rows)}건인데 설정이 없다")
+                if exit_code == EXIT_OK:
+                    exit_code = EXIT_MAIL_UNCONFIGURED
+            else:
+                print("[mail] 콘솔 출력으로 대체 (위 목록)")
         else:  # False = 설정됐으나 실패
-            print("[mail] 발송 실패 — 콘솔 출력으로 대체 (위 목록)")
-            if exit_code == EXIT_OK:
+            print("[mail] 발송 실패")
+        if sent is not True:
+            print(f"[mail] {len(rows)}건은 미발송으로 남는다. 다음 회차에 다시 나간다")
+            if sent is False and exit_code == EXIT_OK:
                 exit_code = EXIT_MAIL_FAILED
         return exit_code
     finally:

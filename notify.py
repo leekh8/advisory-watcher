@@ -31,6 +31,23 @@ def _load_env() -> dict:
     return env
 
 
+def mail_status() -> str:
+    """메일 설정 상태를 사람이 읽는 한 줄로. 미설정의 원인을 구분한다.
+
+    파일이 아예 없는 것과 파일은 있는데 값이 빈 것은 조치가 다르다. 둘 다 None으로
+    뭉뚱그리면 로그에 틀린 진단이 남는다. 실제로 CI 로그 10일치에 ".env 없음"이 찍혀
+    있었지만, 워크플로우는 매번 .env를 만들고 있었고 비어 있던 건 Secrets 쪽이었다.
+    """
+    if not ENV_PATH.exists():
+        return f"{ENV_PATH.name} 파일 없음"
+    env = _load_env()
+    missing = [k for k in ("GMAIL_USER", "GMAIL_APP_PASSWORD")
+               if not (env.get(k) or "").strip()]
+    if missing:
+        return f"{ENV_PATH.name}는 있으나 값이 빔: " + ", ".join(missing)
+    return "설정됨"
+
+
 def _build(rows, user: str, to: str) -> EmailMessage:
     msg = EmailMessage()
     msg["Subject"] = f"[advisory-watcher] 신규 보안 권고문 {len(rows)}건"
@@ -70,7 +87,8 @@ def send_new_advisories(rows):
     """신규 권고문 알림 발송.
 
     반환값 3-state (호출부가 exit code를 정하도록 미설정과 실패를 구분):
-      None  = 미설정(.env 없음) — 콘솔 대체가 정상, 오류 아님
+      None  = 메일 설정 없음. 원인은 mail_status()로 구분한다.
+              무인 실행에서는 오류다(호출부의 --require-mail 참고).
       True  = 발송 성공
       False = 설정됐으나 발송 실패 — 모니터링이 잡아야 할 오류
     """

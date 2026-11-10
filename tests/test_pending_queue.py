@@ -7,6 +7,8 @@
 표준 라이브러리만 쓴다. 이 저장소는 의존성 0을 유지한다.
     python -m unittest discover -s tests -v
 """
+import contextlib
+import io
 import sys
 import tempfile
 import unittest
@@ -136,6 +138,83 @@ class MailStatusTest(unittest.TestCase):
         self.notify.ENV_PATH.write_text(
             "GMAIL_USER=a@b.com\nGMAIL_APP_PASSWORD=pw\nMAIL_TO=a@b.com\n", encoding="utf-8")
         self.assertEqual(self.notify.mail_status(), "설정됨")
+
+
+class SeedGateTest(unittest.TestCase):
+    """DB가 비었을 때 알림을 생략하는 조건.
+
+    🛑 "비었다"는 "첫 실행이다"가 아니다. 상태를 잃은 것도 비어 보인다.
+
+    2026-11-10 실측. GitHub Actions 캐시는 일정 기간 쓰이지 않으면 지워진다.
+    예약이 10-20 에 멈춘 뒤 캐시가 사라졌고, 되살린 첫 실행이
+    "Cache not found for input keys: advisory-db-" 로 빈 DB를 받았다.
+    그때 seed 분기가 권고문 60건을 "이미 알림"으로 찍어 21일분이 사라졌다.
+
+    예약이 멈춘 것은 눈에 보였지만, 되살아난 실행이 삼킨 것은 안 보였다.
+    그래서 seed 는 --seed 를 줄 때만 한다.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.db = Path(self.tmp.name) / "t.db"
+        self._argv = sys.argv
+        self._scan = watcher.scan
+        self._get_conn = watcher.get_conn
+        watcher.get_conn = lambda *a, **k: self._get_conn(self.db)
+
+    def tearDown(self):
+        sys.argv = self._argv
+        watcher.scan = self._scan
+        watcher.get_conn = self._get_conn
+        self.tmp.cleanup()
+
+    def _run(self, *args):
+        def fake_scan(conn):
+            rows = []
+            for i in range(3):
+                rid = insert(conn, "KISA", f"e{i}")
+                rows.append(conn.execute(
+                    "SELECT * FROM advisories WHERE id=?", (rid,)).fetchone())
+            return rows, []
+
+        watcher.scan = fake_scan
+        sys.argv = ["watcher.py", "--no-mail", *args]
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            code = watcher.main()
+        return code, buf.getvalue()
+
+    def _pending(self):
+        conn = self._get_conn(self.db)
+        try:
+            return watcher.pending_count(conn)
+        finally:
+            conn.close()
+
+    def test_seed_를_주면_알림_없이_적재한다(self):
+        code, out = self._run("--seed")
+        self.assertEqual(code, watcher.EXIT_OK)
+        self.assertEqual(self._pending(), 0)
+        self.assertIn("seed 완료", out)
+
+    def test_seed_없이_빈_DB면_전부_미발송으로_남는다(self):
+        code, out = self._run()
+        self.assertEqual(code, watcher.EXIT_OK)
+        self.assertEqual(self._pending(), 3, "빈 DB를 첫 실행으로 읽어 삼켰다")
+
+    def test_상태를_잃었을_수_있다고_경고한다(self):
+        _, out = self._run()
+        self.assertIn("DB가 비어 있었다", out)
+        self.assertIn("--seed", out)
+
+    def test_빈_DB가_아니면_seed_를_줘도_삼키지_않는다(self):
+        conn = self._get_conn(self.db)
+        insert(conn, "KISA", "old")
+        watcher.mark_notified(conn, watcher.pending(conn))
+        conn.close()
+        code, _ = self._run("--seed")
+        self.assertEqual(code, watcher.EXIT_OK)
+        self.assertEqual(self._pending(), 3, "비지 않은 DB에 seed 가 먹었다")
 
 
 if __name__ == "__main__":

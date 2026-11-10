@@ -9,7 +9,7 @@ RSS fetch (urllib, 재시도) → 파싱 (xml.etree) → SQLite UNIQUE 적재 �
 ```
 
 - **신규만 알림** — `UNIQUE(source, entry_id)`로 이미 본 항목은 조용히 스킵
-- **첫 실행 = seed 모드** — 기존 공지 전체를 알림 없이 적재만 (알림 폭탄 방지)
+- **seed 는 `--seed` 를 줄 때만** (첫 설치용). 빈 DB를 첫 실행으로 단정하지 않는다
 - **CVE 자동 추출** — 제목/본문에서 `CVE-YYYY-NNNN` 정규식 추출해 함께 저장
 - **소스 하나가 죽어도 계속** — 오류는 `scan_log`에 기록하고 나머지 소스 진행
 - **발송 실패분은 큐에 남아 다음 회차에 재시도**. 놓친 권고문이 사라지지 않는다
@@ -18,11 +18,12 @@ RSS fetch (urllib, 재시도) → 파싱 (xml.etree) → SQLite UNIQUE 적재 �
 ## 사용
 
 ```bash
-python watcher.py                # 스캔 + 알림 (첫 실행은 seed, 알림 없음)
+python watcher.py                # 스캔 + 미발송 전부 알림
 python watcher.py --no-mail      # 스캔만
 python watcher.py --list 10      # 최근 수집분 조회
 python watcher.py --pending      # 아직 못 보낸 권고문 조회
 python watcher.py --require-mail # 무인 실행. 메일 미설정을 오류 취급
+python watcher.py --seed         # 첫 설치. 수집분을 알림 없이 적재만
 ```
 
 메일 알림: `.env.example`을 `.env`로 복사해 Gmail 앱 비밀번호 설정.
@@ -75,27 +76,44 @@ schtasks /Create /TN advisory-watcher /SC DAILY /ST 09:00 `
 
 ### GitHub Actions (사실상 주 실행기)
 
-`.github/workflows/watch.yml` 가 매일 00:23 UTC(09:23 KST)에 돌린다. 정각을 피한 이유는
+`.github/workflows/watch.yml` 가 매일 00:23 UTC(09:23 KST)에 돈다. 정각을 피한 이유는
 공식 문서가 "High load times include the start of every hour", "some queued jobs
-may be dropped" 라고 적어 둔 기 낮추기 끔이다. DB 는 Actions 추어(cache)에 든다.
+may be dropped" 라고 적어 둔 것이다. 늦어지는 데 그치지 않고 그날 회차가 아예 빠질 수
+있다. 수집 DB 는 Actions 캐시에 둔다.
 
-새로 포후하는 것은 이것이 아니라 아래 함정이다.
+이 저장소를 두 번 조용히 죽인 함정이 둘 있다. 둘 다 아래에 적어 둔다.
 
-> 🛑 **공개 저장소의 예약 워크흐로는 60일 무활동으로 자동 중단된다.**
+> 🛑 **함정 1. 공개 저장소의 예약 워크플로는 60일 무활동으로 자동 중단된다.**
 > 공식 문서: "In a public repository, scheduled workflows are automatically
 > disabled when no repository activity has occurred in 60 days."
 >
-> 실제로 이 저장소가 걸렸다. 마지리 커밋이 2026-08-20 이었고, 마지리 실행이
-> 10-20 이고, 11-10 에 보니 `disabled_inactivity` 였다. **21일간 수집이 0 이었다.**
-> 이번엔 에러도 빨간불도 없었다. 생기는 일 자신이 없었기 때문이다.
+> 실제로 걸렸다. 마지막 커밋이 2026-08-20, 마지막 실행이 10-20 이었고 11-10 에 보니
+> `disabled_inactivity` 였다. **21일간 수집이 0 이었다.** 에러도 빨간불도 없었다.
+> 생기는 일 자체가 없었기 때문이다.
 >
-> 다시 컰는 법은 둘이다. 그낥 커밋은 재활성화 조건이 아니다.
-> - **cron 값을 바꾸는 커밋** -- "if a user with write permissions to the
+> 다시 켜는 법은 둘이다. 그냥 커밋은 재활성화 조건이 아니다.
+> - **cron 값을 바꾸는 커밋**: "if a user with write permissions to the
 >   repository makes a commit that changes the `cron` schedule on the workflow,
 >   the workflow will be reactivated"
 > - Actions 화면에서 Enable workflow, 또는 `gh workflow enable "Advisory watch"`
 >
-> 점검은 `gh workflow list --all` 에 `active` 가 찍힐는가로 한다.
+> 점검은 `gh workflow list --all` 에 `active` 가 찍히는가로 한다.
+
+> 🛑 **함정 2. 캐시는 영구 저장소가 아니다. 상태를 잃으면 빈 DB로 시작한다.**
+>
+> 함정 1 로 예약이 멈춘 뒤 캐시도 쓰이지 않아 사라졌다. 11-10 에 되살린 첫 실행이
+> `Cache not found for input keys: advisory-db-` 로 빈 DB를 받았다.
+>
+> 그때까지 코드는 "DB가 비었다"를 "첫 실행이다"로 읽어 seed 모드로 들어갔고,
+> 수집한 60건을 알림 없이 `notified=1` 로 찍었다. **21일분이 메일 한 통 없이
+> 사라졌다.** 예약이 멈춘 것은 눈에 보였지만 되살아난 실행이 삼킨 것은 안 보였다.
+>
+> 지금은 seed 를 `--seed` 로만 한다. 빈 DB를 만나면 전부 미발송으로 두고 경고를
+> 찍는다. 알림 폭탄은 `MAX_PENDING`(200건)이 막으므로 seed 가 그 일을 겸할 이유가
+> 없다. 진짜 첫 설치일 때만 수동 실행에서 `seed` 를 켠다.
+>
+> 상태를 캐시 밖(저장소 커밋 등)으로 옮기는 것이 다음 걸음이다. 지금은 캐시가
+> 사라져도 **유실 대신 중복 알림**으로 끝난다는 선까지만 맞춰 뒀다.
 
 ## 구조
 

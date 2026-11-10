@@ -4,20 +4,31 @@ on:
   schedule:
     # 매일 00:23 UTC = 09:23 KST. 정각을 피한다.
     #
-    # 공식 문서(events-that-trigger-workflows, schedule 주석): "High load times
+    # 공식 문서(events-that-trigger-workflows 의 schedule 절): "High load times
     # include the start of every hour", "To decrease the chance of delay, schedule
     # your workflow to run at a different time of the hour", "If the load is
     # sufficiently high enough, some queued jobs may be dropped." 정각에 두면
-    # 늦추어지는 것에 기치지 않고 그날 회차가 빠질 수 있다.
+    # 늦어지는 데 그치지 않고 그날 회차가 아예 빠질 수 있다.
     #
-    # 이 값을 바무는 것 자신이 2026-11-10 에 이 워크흐로를 다시 컰 방법이기도
-    # 하다. 08-20 후 커밋이 없어 10-20 에 disabled_inactivity 로 꺼졌고,
+    # 이 값을 바꾸는 것 자체가 2026-11-10 에 이 워크플로를 다시 켠 방법이기도
+    # 하다. 08-20 뒤로 커밋이 없어 10-20 에 disabled_inactivity 로 꺼졌는데,
     # 공식 문서가 적은 재활성화 조건은 그냥 커밋이 아니라 cron 을 바꾸는
     # 커밋이다: "if a user with write permissions to the repository makes a
     # commit that changes the cron schedule on the workflow, the workflow will be
     # reactivated". 그래서 21일간 수집이 0 이었다.
     - cron: '23 0 * * *'
-  workflow_dispatch: {}    # 수동 실행(첫 seed·테스트용)
+
+  # 수동 실행. seed 는 진짜 첫 설치에만 켠다.
+  #
+  # 🛑 켜면 그 회차에 수집한 권고문을 알림 없이 "이미 알림"으로 찍는다. 상태를
+  #    잃은 뒤(캐시 삭제 등) 켜면 그 기간 권고문이 메일 없이 사라진다.
+  #    11-10 에 그 일이 났다. watcher.py 의 seed 주석 참고.
+  workflow_dispatch:
+    inputs:
+      seed:
+        description: '첫 설치다. 수집분을 알림 없이 적재만 한다'
+        type: boolean
+        default: false
 
 permissions:
   contents: read           # DB는 캐시에 두므로 repo 쓰기 불필요
@@ -69,9 +80,16 @@ jobs:
 
       - name: Run watcher
         id: watch
+        env:
+          SEED: ${{ inputs.seed }}
         run: |
           set +e
-          python watcher.py --require-mail
+          if [ "${SEED}" = "true" ]; then
+            echo "::warning::seed 모드. 이번 회차 권고문은 알림 없이 적재만 한다."
+            python watcher.py --require-mail --seed
+          else
+            python watcher.py --require-mail
+          fi
           code=$?
           set -e
           echo "code=${code}" >> "$GITHUB_OUTPUT"

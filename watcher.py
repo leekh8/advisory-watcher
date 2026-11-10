@@ -5,11 +5,12 @@ advisory-watcher — KISA 보호나라 + Fortinet PSIRT 보안 권고문 수집�
 SQLite에 적재하고 알림(메일 또는 콘솔)을 보낸다.
 
 사용:
-    python watcher.py            # 스캔 + 신규 알림 (첫 실행은 seed 모드 — 알림 없음)
+    python watcher.py            # 스캔 + 미발송 전부 알림
     python watcher.py --no-mail  # 스캔만 (알림 생략)
     python watcher.py --list 10  # 최근 수집분 조회
     python watcher.py --pending  # 아직 못 보낸 권고문 조회
     python watcher.py --require-mail  # 무인 실행. 메일 미설정을 오류 취급
+    python watcher.py --seed     # 진짜 첫 실행. 알림 없이 적재만
 """
 from __future__ import annotations
 
@@ -284,6 +285,8 @@ def main() -> int:
                     help="메일 미설정을 오류로 취급. 무인 실행(CI, cron)에서 켠다")
     ap.add_argument("--list", type=int, metavar="N", help="최근 N건 조회 후 종료")
     ap.add_argument("--pending", action="store_true", help="미발송 권고문 조회 후 종료")
+    ap.add_argument("--seed", action="store_true",
+                    help="DB가 비었을 때 알림 없이 적재만. 진짜 첫 실행에만 쓴다")
     args = ap.parse_args()
 
     conn = get_conn()
@@ -302,17 +305,32 @@ def main() -> int:
             print_rows(rows)
             return EXIT_OK
 
-        first_run = conn.execute("SELECT COUNT(*) FROM advisories").fetchone()[0] == 0
+        empty = conn.execute("SELECT COUNT(*) FROM advisories").fetchone()[0] == 0
         new_rows, errors = scan(conn)
         exit_code = EXIT_SOURCE_ERROR if errors else EXIT_OK
         if errors:
             print(f"[warn] 소스 오류 {len(errors)}건: " + " / ".join(errors))
 
-        if first_run:
-            # 첫 실행: 기존 공지 전체가 "신규"로 잡히므로 알림 없이 seed만
+        # 🛑 "DB가 비었다"를 "첫 실행이다"로 읽으면 안 된다. 상태를 잃은 것도
+        #    비어 보인다. 그래서 seed 는 --seed 를 줄 때만 한다.
+        #
+        #    2026-11-10 실측. GitHub Actions 캐시는 일정 기간 쓰이지 않으면
+        #    지워진다. 예약이 10-20 에 멈춘 뒤 캐시가 사라졌고, 되살린 첫 실행이
+        #    "Cache not found for input keys: advisory-db-" 로 빈 DB를 받았다.
+        #    그때 이 분기가 seed 로 들어가 권고문 60건을 "이미 알림"으로 찍었다.
+        #    21일분 권고문이 메일 한 통 없이 사라졌다. 예약이 멈춘 것은 눈에
+        #    보였지만, 되살아난 실행이 조용히 삼킨 것은 안 보였다.
+        #
+        #    알림 폭탄은 이제 MAX_PENDING 이 막는다. seed 가 그 일을 겸할 이유가
+        #    없어졌고, 겸하는 동안 유실 경로가 돼 있었다.
+        if empty and args.seed:
             mark_notified(conn, new_rows)
-            print(f"[done] 첫 실행 seed 완료 — {len(new_rows)}건 적재 (알림 생략)")
+            print(f"[done] seed 완료 - {len(new_rows)}건 적재 (요청대로 알림 생략)")
             return exit_code
+        if empty:
+            print(f"[warn] DB가 비어 있었다. 수집한 {len(new_rows)}건을 전부 미발송으로 둔다.")
+            print("[warn] 진짜 첫 실행이면 --seed 로 다시 돌려 알림 없이 적재한다.")
+            print("[warn] 첫 실행이 아니면 상태를 잃은 것이다 (캐시 삭제 등). 그대로 알린다.")
 
         rows = pending(conn)
         total_pending = pending_count(conn)

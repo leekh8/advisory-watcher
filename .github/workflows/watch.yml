@@ -16,7 +16,23 @@ on:
     # 커밋이다: "if a user with write permissions to the repository makes a
     # commit that changes the cron schedule on the workflow, the workflow will be
     # reactivated". 그래서 21일간 수집이 0 이었다.
-    - cron: '23 0 * * *'
+    #
+    # 🛑 **`state=active` 가 「예약이 실제로 돈다」는 뜻이 아니다** (11-11 실측).
+    #    11-10 에 cron 을 바꿔 `disabled_inactivity` 에서 `active` 로 되살렸는데,
+    #    11-11 의 00:23 UTC 예약이 **다섯 시간이 지나도 발화하지 않았다.**
+    #    API 로 봐도 workflow state=active, repo archived=false, disabled=false
+    #    였고 같은 커밋으로 돌린 수동 실행 2건은 둘 다 success 였다. 내 쪽 변수는
+    #    없고 GitHub 이 그 회차를 그냥 돌리지 않았다.
+    #
+    #    공식 문서가 "some queued jobs may be dropped" 라고 적어 둔 그 자리로
+    #    보인다. 되살린 첫 회차라 더 그렇다. 그래서 cron 을 한 번 더 옮겨
+    #    재등록을 시킨다(cron 을 바꾸는 커밋이 재활성화 조건이다).
+    #
+    #    🛑 **점검은 `active` 가 아니라 「오늘 schedule 런이 있나」로 한다.**
+    #       `gh run list --json event` 에 `schedule` 이 보이는지 센다.
+    #       그마저 또 빠지면 예약을 믿을 수 없다는 뜻이고, 그때는 수동 실행이
+    #       아니라 다른 깨우는 길을 찾아야 한다.
+    - cron: '47 0 * * *'
 
   # 수동 실행. seed 는 진짜 첫 설치에만 켠다.
   #

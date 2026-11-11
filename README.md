@@ -76,7 +76,7 @@ schtasks /Create /TN advisory-watcher /SC DAILY /ST 09:00 `
 
 ### GitHub Actions (사실상 주 실행기)
 
-`.github/workflows/watch.yml` 가 매일 00:23 UTC(09:23 KST)에 돈다. 정각을 피한 이유는
+`.github/workflows/watch.yml` 가 매일 00:47 UTC(09:47 KST)에 돈다. 정각을 피한 이유는
 공식 문서가 "High load times include the start of every hour", "some queued jobs
 may be dropped" 라고 적어 둔 것이다. 늦어지는 데 그치지 않고 그날 회차가 아예 빠질 수
 있다. 수집 DB 는 Actions 캐시에 둔다.
@@ -114,6 +114,23 @@ may be dropped" 라고 적어 둔 것이다. 늦어지는 데 그치지 않고 �
 >
 > 상태를 캐시 밖(저장소 커밋 등)으로 옮기는 것이 다음 걸음이다. 지금은 캐시가
 > 사라져도 **유실 대신 중복 알림**으로 끝난다는 선까지만 맞춰 뒀다.
+
+> 🛑 **함정 3. `state=active` 는 「예약이 실제로 돈다」는 뜻이 아니다.**
+>
+> 11-10 에 cron 을 바꿔 `disabled_inactivity` 에서 `active` 로 되살렸는데,
+> 11-11 의 예약이 **다섯 시간이 지나도 발화하지 않았다.** API 로 봐도
+> workflow `state=active`, repo `archived=false`, `disabled=false` 였고 같은
+> 커밋으로 돌린 수동 실행 2건은 둘 다 성공이었다. GitHub 이 그 회차를 그냥
+> 돌리지 않았다. 공식 문서의 "some queued jobs may be dropped" 가 그 자리다.
+>
+> **점검은 `active` 가 아니라 「오늘 schedule 런이 있나」로 한다.**
+>
+> ```bash
+> gh run list --limit 5 --json event,createdAt,conclusion
+> ```
+>
+> `event` 에 `schedule` 이 보이는지 센다. `active` 만 보면 멈춘 것을 모른다.
+> 함정 1 과 같은 실수를 한 겹 위에서 또 하는 꼴이다.
 
 ## 구조
 
